@@ -164,6 +164,8 @@ jobs:
             fi
             npm run build
             echo "Build successful"
+            pwd
+            ls -la
       - *notify-on-fail
 
   terraform-validate:

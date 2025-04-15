@@ -12,6 +12,7 @@ executors:
   terraform-executor:
     docker:
       - image: hashicorp/terraform:latest
+      - image: 'cibuilds/base:latest'
   slack-executor:
     docker:
       - image: 'cibuilds/base:latest'
@@ -139,33 +140,7 @@ jobs:
       - run:
           name: Run unit test
           command: npm run test
-      - *notify-on-fail
-
-  build-app:
-    executor: app-executor
-    steps:
-      - checkout
-      - *show-current-branch-name
-      - *restore-cache
-      - aws-cli/setup:
-          profile-name: default
-      - run:
-          name: Build project
-          command: |
-            rm -rf .env
-            if [ "${CIRCLE_BRANCH}" == "develop" ]
-            then
-              aws --region eu-central-1 s3 sync s3://chattyapp-env-files/frontend/develop .
-            elif [ "${CIRCLE_BRANCH}" == "staging" ]
-            then
-              aws --region eu-central-1 s3 sync s3://chattyapp-env-files/frontend/staging .
-            else
-              aws --region eu-central-1 s3 sync s3://chattyapp-env-files/frontend/production .
-            fi
-            npm run build
-            echo "Build successful"
-            pwd
-            ls -la
+      - codecov/upload
       - *notify-on-fail
 
   terraform-validate:
@@ -186,6 +161,7 @@ jobs:
     steps:
       - checkout
       - *show-current-branch-name
+      - run: mkdir -p temp_folder
       - run:
           name: Terraform plan
           command: |
@@ -199,7 +175,11 @@ jobs:
             cd infrastructure/
             terraform workspace select ${CIRCLE_BRANCH}
             terraform apply -auto-approve
-            terraform output cloudfront_distribution_id > ../cloudfront_distribution_id.txt
+            terraform output cloudfront_distribution_id > ../temp_folder/cloudfront_distribution_id.txt
+      - persist_to_workspace:
+          root: ./
+          paths:
+            - temp_folder
       - *notify-on-fail
 
   upload-build-to-s3:
@@ -212,21 +192,37 @@ jobs:
       - run:
           name: Upload build to S3
           command: |
-            pwd
-            ls -la
-            aws --region eu-central-1 s3 cp build s3://chatapp-client-${CIRCLE_BRANCH}-app
+            rm -rf .env
+            if [ "${CIRCLE_BRANCH}" == "develop" ]
+            then
+              # Make sure to use your correct s3 bucket name
+              aws --region eu-central-1 s3 sync s3://<your-s3-bucket>/frontend/develop .
+            elif [ "${CIRCLE_BRANCH}" == "staging" ]
+            then
+              # Make sure to use your correct s3 bucket name
+              aws --region eu-central-1 s3 sync s3://<your-s3-bucket>/frontend/staging .
+            else
+              # Make sure to use your correct s3 bucket name
+              aws --region eu-central-1 s3 sync s3://<your-s3-bucket>/frontend/production .
+            fi
+            npm run build
+            echo "Build successful"
+            # For the bucket name here, use the variable prefix inside your variables.tf file
+            aws --region eu-central-1 s3 cp build s3://<variable-prefix>-${CIRCLE_BRANCH}-app --recursive
       - *notify-on-fail
 
   aws-cloudfront-distribution:
     executor: app-executor
     steps:
       - checkout
+      - attach_workspace:
+          at: ./
       - aws-cli/setup:
           profile-name: default
       - run:
           name: Invalidate cloudfront distribution
           command: |
-            CLOUDFRONT_DISTRIBUTION_ID=$(cat ../cloudfront_distribution_id.txt | sed 's/\"//g')
+            CLOUDFRONT_DISTRIBUTION_ID=$(cat temp_folder/cloudfront_distribution_id.txt | sed 's/\"//g')
             echo $CLOUDFRONT_DISTRIBUTION_ID
             aws configure set preview.cloudfront true
             aws cloudfront create-invalidation --distribution-id ${CLOUDFRONT_DISTRIBUTION_ID} --paths /\*
@@ -345,18 +341,9 @@ workflows:
                 - develop
                 - staging
                 - main
-      - build-app:
-          requires:
-            - unit-test
-          filters:
-            branches:
-              only:
-                - develop
-                - staging
-                - main
       - terraform-validate:
           requires:
-            - build-app
+            - unit-test
           filters:
             branches:
               only:
